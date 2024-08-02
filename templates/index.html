@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Twitter動画投稿アプリ</title>
+    <link href="https://fonts.googleapis.com/css2?family=Roboto:wght@400;700&family=Open+Sans&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/5.15.3/css/all.min.css">
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.0.1/socket.io.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <h1>Twitter動画投稿アプリ</h1>
+            <button id="toggleTheme" class="theme-toggle">
+                <i class="fas fa-moon"></i>
+            </button>
+        </header>
+        
+        {% with messages = get_flashed_messages() %}
+          {% if messages %}
+            <ul class="flashes">
+            {% for message in messages %}
+              <li>{{ message }}</li>
+            {% endfor %}
+            </ul>
+          {% endif %}
+        {% endwith %}
+        
+        <div class="dashboard">
+            <div class="card">
+                <h2>ステータス</h2>
+                <div id="currentStatus" class="status-display"></div>
+            </div>
+            
+            <div class="card">
+                <h2>自動投稿設定</h2>
+                <div class="auto-post-controls">
+                    <input type="number" id="postInterval" min="1" placeholder="投稿間隔（分）">
+                    <button id="startAutoPost" class="button start-button">
+                        <i class="fas fa-play"></i> 自動投稿開始
+                    </button>
+                    <button id="stopAutoPost" class="button stop-button">
+                        <i class="fas fa-stop"></i> 自動投稿停止
+                    </button>
+                </div>
+                <div id="autoPostStatus" class="status-display"></div>
+            </div>
+            
+            <div class="card">
+                <h2>手動投稿</h2>
+                <button id="postTweet" class="button post-button">
+                    <i class="fas fa-feather"></i> ランダムにツイートを投稿
+                </button>
+            </div>
+            
+            <div class="card">
+                <h2>最近のアクティビティ</h2>
+                <ul id="recentActivities" class="activity-list"></ul>
+            </div>
+        </div>
+        
+        <nav>
+            <a href="{{ url_for('manage_posts') }}" class="button nav-button">
+                <i class="fas fa-film"></i> 投稿内容管理
+            </a>
+            <a href="{{ url_for('manage_accounts') }}" class="button nav-button">
+                <i class="fas fa-users"></i> ユーザーアカウント管理
+            </a>
+        </nav>
+    </div>
+
+    <script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

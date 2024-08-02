@@ -1,0 +1,73 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>投稿内容管理</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+    <div class="container">
+        <h1>投稿内容管理</h1>
+        <a href="{{ url_for('index') }}" class="button">メイン画面に戻る</a>
+
+        <h2>新規投稿追加</h2>
+        <form id="addPostForm">
+            <div class="form-group">
+                <label for="newFile">動画ファイル:</label>
+                <input type="file" id="newFile" name="file" accept=".mp4,.mov,.avi" required>
+            </div>
+            <div class="form-group">
+                <label for="newCaption">キャプション:</label>
+                <textarea id="newCaption" name="caption" rows="3" required></textarea>
+            </div>
+            <div class="form-group">
+                <label for="newReplyContent">リプライ内容:</label>
+                <textarea id="newReplyContent" name="reply_content" rows="3" required></textarea>
+            </div>
+            <button type="submit">追加</button>
+        </form>
+
+        <h2>投稿一覧</h2>
+        <table id="postsTable">
+            <thead>
+                <tr>
+                    <th>ファイル名</th>
+                    <th>キャプション</th>
+                    <th>リプライ内容</th>
+                    <th>操作</th>
+                </tr>
+            </thead>
+            <tbody>
+                <!-- ここに投稿のリストが動的に追加されます -->
+            </tbody>
+        </table>
+    </div>
+
+    <!-- 編集用モーダル -->
+    <div id="editModal" class="modal">
+        <div class="modal-content">
+            <span class="close">&times;</span>
+            <h2>投稿を編集</h2>
+            <form id="editPostForm">
+                <input type="hidden" id="editId" name="id">
+                <div class="form-group">
+                    <label for="editFile">動画ファイル:</label>
+                    <input type="file" id="editFile" name="file" accept=".mp4,.mov,.avi">
+                </div>
+                <div class="form-group">
+                    <label for="editCaption">キャプション:</label>
+                    <textarea id="editCaption" name="caption" rows="3" required></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="editReplyContent">リプライ内容:</label>
+                    <textarea id="editReplyContent" name="reply_content" rows="3" required></textarea>
+                </div>
+                <button type="submit">更新</button>
+            </form>
+        </div>
+    </div>
+
+    <script src="{{ url_for('static', filename='manage_posts.js') }}"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+Flask
+Flask-SocketIO
+Flask-CORS
+python-dotenv
+tweepy
+Werkzeug
+gunicorn
+eventlet
+cryptography
