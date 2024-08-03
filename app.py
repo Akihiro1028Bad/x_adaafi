@@ -1,7 +1,10 @@
-# app.py
-
 import os
+import sys
+import time
 import tweepy
+import json
+import requests
+from requests_oauthlib import OAuth1
 from flask import Flask, render_template, request, flash, redirect, url_for, jsonify
 from flask_socketio import SocketIO, emit
 from flask_cors import CORS
@@ -10,11 +13,12 @@ import logging
 from logging.handlers import RotatingFileHandler
 import sqlite3
 import random
-import time
 from cryptography.fernet import Fernet
 import threading
 from datetime import datetime, timedelta
-import asyncio
+from requests.exceptions import RequestException
+from moviepy.editor import VideoFileClip
+import tempfile
 
 app = Flask(__name__)
 app.secret_key = os.urandom(24)
@@ -23,7 +27,7 @@ socketio = SocketIO(app, cors_allowed_origins="*", logger=True, engineio_logger=
 
 # ロギングの設定
 logging.basicConfig(level=logging.DEBUG)
-file_handler = RotatingFileHandler('app.log', maxBytes=10000, backupCount=3)
+file_handler = RotatingFileHandler('app.log', maxBytes=10000000000000000, backupCount=3)
 file_handler.setLevel(logging.DEBUG)
 formatter = logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 file_handler.setFormatter(formatter)
@@ -91,6 +95,36 @@ def init_db():
 # アプリケーション起動時にデータベースを初期化
 init_db()
 
+def process_video(video_path, max_duration=120):
+    """
+    動画を処理し、必要に応じて切り取ります。
+    :param video_path: 元の動画ファイルのパス
+    :param max_duration: 最大許容時間（秒）
+    :return: 処理された動画のパス
+    """
+    clip = VideoFileClip(video_path)
+    
+    if clip.duration <= max_duration:
+        clip.close()
+        return video_path
+    
+    app.logger.info(f"動画が{max_duration}秒を超えています。切り取りを行います。")
+    
+    # 動画を切り取る
+    cut_clip = clip.subclip(0, max_duration)
+    
+    # 一時ファイルを作成
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
+        temp_path = temp_file.name
+    
+    # 切り取った動画を保存
+    cut_clip.write_videofile(temp_path, codec="libx264", audio_codec="aac")
+    
+    clip.close()
+    cut_clip.close()
+    
+    return temp_path
+
 def insert_video_data(filename, caption, reply_content):
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
@@ -106,6 +140,213 @@ def insert_video_data(filename, caption, reply_content):
 
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+# Twitter API関連の設定
+MEDIA_ENDPOINT_URL = 'https://upload.twitter.com/1.1/media/upload.json'
+POST_TWEET_URL = 'https://api.twitter.com/2/tweets'
+
+class VideoTweet:
+    def __init__(self, file_name, oauth):
+        self.video_filename = file_name
+        self.total_bytes = os.path.getsize(self.video_filename)
+        self.media_id = None
+        self.processing_info = None
+        self.oauth = oauth
+        self.upload_start_time = None
+        app.logger.info(f"VideoTweetインスタンスを初期化: ファイル名={file_name}, サイズ={self.total_bytes}バイト")
+
+    def upload_init(self):
+        app.logger.info('INITリクエストを開始')
+        request_data = {
+            'command': 'INIT',
+            'media_type': 'video/mp4',
+            'total_bytes': self.total_bytes,
+            'media_category': 'tweet_video'
+        }
+        req = requests.post(url=MEDIA_ENDPOINT_URL, data=request_data, auth=self.oauth)
+        media_id = req.json()['media_id']
+        self.media_id = media_id
+        self.upload_start_time = time.time()
+        app.logger.info(f'Media ID: {str(media_id)}')
+        return req
+
+    def upload_chunk(self, chunk, segment_id):
+        max_retries = 5
+        retry_delay = 10
+
+        for attempt in range(max_retries):
+            try:
+                request_data = {
+                    'command': 'APPEND',
+                    'media_id': self.media_id,
+                    'segment_index': segment_id
+                }
+                files = {
+                    'media': chunk
+                }
+                app.logger.debug(f'APPEND: チャンク {segment_id + 1} リクエスト送信')
+                req = requests.post(url=MEDIA_ENDPOINT_URL, data=request_data, files=files, auth=self.oauth, timeout=60)
+                app.logger.debug(f'APPEND: チャンク {segment_id + 1} レスポンス受信: ステータスコード {req.status_code}')
+                
+                if req.status_code in [200, 204]:  # 200と204の両方を成功として扱う
+                    app.logger.info(f'APPEND: チャンク {segment_id + 1} アップロード成功')
+                    return segment_id
+                else:
+                    app.logger.error(f"APPENDリクエスト中にエラーが発生: ステータスコード {req.status_code}, レスポンス {req.text}")
+                    if attempt < max_retries - 1:
+                        app.logger.info(f"チャンク {segment_id + 1}: {retry_delay}秒後にリトライします...")
+                        time.sleep(retry_delay)
+                    else:
+                        app.logger.error(f"チャンク {segment_id + 1}: 最大リトライ回数に達しました。")
+                        return None
+            except RequestException as e:
+                app.logger.error(f"チャンク {segment_id + 1} リクエスト中にエラーが発生しました: {str(e)}")
+                if attempt < max_retries - 1:
+                    app.logger.info(f"チャンク {segment_id + 1}: {retry_delay}秒後にリトライします...")
+                    time.sleep(retry_delay)
+                else:
+                    app.logger.error(f"チャンク {segment_id + 1}: 最大リトライ回数に達しました。")
+                    return None
+        return None
+
+    def upload_append(self):
+        app.logger.info('APPENDリクエストを開始')
+        segment_id = 0
+        bytes_sent = 0
+        
+        with open(self.video_filename, 'rb') as file:
+            while bytes_sent < self.total_bytes:
+                chunk = file.read(2*1024*1024)  # 2MBチャンク
+                if not chunk:
+                    break
+                
+                app.logger.info(f'チャンク {segment_id + 1} のアップロードを開始 (サイズ: {len(chunk)} バイト)')
+                result = self.upload_chunk(chunk, segment_id)
+                
+                if result is not None:
+                    bytes_sent += len(chunk)
+                    app.logger.info(f'チャンク {segment_id + 1} のアップロードが成功 (合計: {bytes_sent} バイト)')
+                    
+                    if bytes_sent % (10 * 1024 * 1024) == 0 or bytes_sent == self.total_bytes:
+                        app.logger.info(f'{bytes_sent} / {self.total_bytes} バイトアップロード完了 ({bytes_sent/self.total_bytes*100:.2f}%)')
+                else:
+                    app.logger.error(f"チャンク {segment_id + 1} のアップロードに失敗しました。アップロードを中止します。")
+                    return False
+                
+                segment_id += 1
+
+        app.logger.info('アップロードチャンクが完了しました')
+        return True
+    
+    def upload_finalize(self):
+        app.logger.info('FINALIZEリクエストを開始')
+        request_data = {
+            'command': 'FINALIZE',
+            'media_id': self.media_id
+        }
+        req = requests.post(url=MEDIA_ENDPOINT_URL, data=request_data, auth=self.oauth)
+        app.logger.debug(f"FINALIZEレスポンス: {req.json()}")
+        self.processing_info = req.json().get('processing_info', None)
+        self.check_status()
+
+    def check_status(self):
+        if self.processing_info is None:
+            return
+        state = self.processing_info['state']
+        app.logger.info(f'メディア処理状態: {state}')
+        if state == 'succeeded':
+            return
+        if state == 'failed':
+            app.logger.error('メディア処理に失敗しました')
+            return
+        check_after_secs = self.processing_info['check_after_secs']
+        app.logger.info(f'{check_after_secs} 秒後に再チェックします')
+        time.sleep(check_after_secs)
+        app.logger.info('ステータスチェック')
+        request_params = {
+            'command': 'STATUS',
+            'media_id': self.media_id
+        }
+        req = requests.get(url=MEDIA_ENDPOINT_URL, params=request_params, auth=self.oauth)
+        self.processing_info = req.json().get('processing_info', None)
+        self.check_status()
+
+    def tweet(self, client, caption):
+        app.logger.info('ツイートを投稿します')
+        try:
+            response = client.create_tweet(text=caption, media_ids=[self.media_id])
+            if response.data:
+                tweet_id = response.data['id']
+                app.logger.info(f"メディア付きツイートの投稿に成功しました! ツイートID: {tweet_id}")
+                return tweet_id
+            else:
+                app.logger.error("メディア付きツイートの投稿に失敗しました")
+                return None
+        except Exception as e:
+            app.logger.error(f"ツイート投稿中にエラーが発生しました: {str(e)}")
+            return None
+
+def post_tweet_main_riply(video_filename, caption, reply_content, account):
+    app.logger.info(f"ツイート投稿プロセスを開始: ファイル名={video_filename}")
+    
+    oauth = OAuth1(
+        account['consumer_key'],
+        client_secret=account['consumer_secret'],
+        resource_owner_key=account['access_token'],
+        resource_owner_secret=account['access_token_secret']
+    )
+
+    video_path = os.path.join(app.config['UPLOAD_FOLDER'], video_filename)
+    processed_video_path = process_video(video_path)
+    video_tweet = VideoTweet(processed_video_path, oauth)
+
+    try:
+        init_response = video_tweet.upload_init()
+        if init_response.status_code != 202:
+            app.logger.error(f"INITリクエストが失敗しました: {init_response.status_code}")
+            return False
+
+        if not video_tweet.upload_append():
+            app.logger.error("APPENDリクエストが失敗しました")
+            return False
+
+        video_tweet.upload_finalize()
+
+        client = tweepy.Client(
+            consumer_key=account['consumer_key'],
+            consumer_secret=account['consumer_secret'],
+            access_token=account['access_token'],
+            access_token_secret=account['access_token_secret']
+        )
+
+        tweet_id = video_tweet.tweet(client, caption)
+        if tweet_id:
+            app.logger.info("ツイートが正常に投稿されました")
+            # リプライの投稿
+            if reply_content:
+                try:
+                    time.sleep(10)  # 2分待機
+                    reply_response = client.create_tweet(text=reply_content, in_reply_to_tweet_id=tweet_id)
+
+                    if reply_response.data:
+                        app.logger.info(f"リプライの投稿に成功しました! リプライID: {reply_response.data['id']}")
+                    else:
+                        app.logger.error("リプライの投稿に失敗しました")
+                except Exception as e:
+                    app.logger.error(f"リプライ投稿中にエラーが発生しました: {str(e)}")
+            return True
+        else:
+            app.logger.error("ツイートの投稿に失敗しました")
+            return False
+
+    except Exception as e:
+        app.logger.error(f"ツイート投稿プロセス中にエラーが発生しました: {str(e)}")
+        return False
+    
+    finally:
+        # 処理された動画が元の動画と異なる場合、一時ファイルを削除
+        if processed_video_path != video_path:
+            os.remove(processed_video_path)
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -189,7 +430,6 @@ def get_recent_activities(limit=10):
     app.logger.info(f"最近のアクティビティを取得しました: {len(activities)}件")
     return [{'timestamp': a[1], 'account': a[2], 'action': a[3], 'result': a[4]} for a in activities]
 
-# 修正: アクティブなアカウントを取得する関数
 def get_active_accounts():
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
@@ -199,7 +439,6 @@ def get_active_accounts():
     app.logger.info(f"アクティブなアカウントを取得しました: {len(active_accounts)}件")
     return active_accounts
 
-# 修正: ランダムに動画、キャプション、リプライ内容を選択する関数
 def get_random_post_content():
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
@@ -212,7 +451,6 @@ def get_random_post_content():
     app.logger.info(f"ランダムに投稿内容を選択しました: {result[0]}")
     return result
 
-# 修正: Tweepy API初期化関数
 def initialize_tweepy(account):
     username, consumer_key, consumer_secret, access_token, access_token_secret = account[1:6]
     auth = tweepy.OAuthHandler(consumer_key, consumer_secret)
@@ -225,8 +463,7 @@ def initialize_tweepy(account):
     app.logger.info(f"{username}のTweepy APIを初期化しました")
     return api, client
 
-# 修正: 単一アカウントの投稿処理
-async def post_tweet_for_account(account):
+def post_tweet_for_account(account):
     username = account[1]
     app.logger.info(f"{username}の投稿処理を開始します")
     try:
@@ -238,33 +475,28 @@ async def post_tweet_for_account(account):
 
         api, client = initialize_tweepy(account)
 
-        app.logger.info(f"{username}の動画アップロードを開始します")
-        media = api.media_upload(filename=video_path, media_category='tweet_video')
-        app.logger.info(f"{username}の動画アップロードが完了しました。メディアID: {media.media_id}")
+        account_dict = {
+            'consumer_key': account[2],
+            'consumer_secret': account[3],
+            'access_token': account[4],
+            'access_token_secret': account[5]
+        }
 
-        await asyncio.sleep(5)  # メディアのアップロードが完了するまで待機
+        success = post_tweet_main_riply(filename, caption, reply_content, account_dict)
+        
+        if success:
+            log_activity(username, "ツイート投稿", "成功")
+            return True
+        else:
+            log_activity(username, "ツイート投稿", "失敗")
+            return False
 
-        app.logger.info(f"{username}のメインツイートの投稿を開始します")
-        tweet = client.create_tweet(text=caption, media_ids=[media.media_id])
-        tweet_id = tweet.data['id']
-        app.logger.info(f"{username}のメインツイートの投稿が完了しました。ツイートID: {tweet_id}")
-
-        await asyncio.sleep(60)  # メイン投稿とリプライの間に時間を空ける
-
-        app.logger.info(f"{username}のリプライの投稿を開始します")
-        reply = client.create_tweet(text=reply_content, in_reply_to_tweet_id=tweet_id)
-        reply_id = reply.data['id']
-        app.logger.info(f"{username}のリプライの投稿が完了しました。リプライID: {reply_id}")
-
-        log_activity(username, "ツイート投稿", "成功")
-        return True
     except Exception as e:
         app.logger.error(f"{username}の投稿処理中にエラーが発生しました: {str(e)}", exc_info=True)
         log_activity(username, "ツイート投稿", f"失敗: {str(e)}")
         return False
 
-# 修正: メイン投稿処理
-async def post_tweet():
+def post_tweet():
     global current_status, next_post_time
     app.logger.info("一括ツイート投稿処理を開始します")
     update_status("一括ツイート処理中")
@@ -275,12 +507,13 @@ async def post_tweet():
         update_status("エラー: アクティブなアカウントがありません")
         return False
 
-    tasks = [post_tweet_for_account(account) for account in active_accounts]
-    results = await asyncio.gather(*tasks)
+    success_count = 0
+    for account in active_accounts:
+        if post_tweet_for_account(account):
+            success_count += 1
+        time.sleep(60)  # アカウント間に1分の待機時間を設ける
 
-    success_count = sum(results)
-    total_count = len(results)
-    app.logger.info(f"一括ツイート投稿処理が完了しました。成功: {success_count}/{total_count}")
+    app.logger.info(f"一括ツイート投稿処理が完了しました。成功: {success_count}/{len(active_accounts)}")
     
     update_status("待機中")
     if auto_posting_thread:
@@ -291,13 +524,13 @@ async def post_tweet():
 def auto_post_tweet():
     global auto_posting_thread, next_post_time
     while auto_posting_thread:
-        asyncio.run(post_tweet())
+        post_tweet()
         socketio.emit('status', {'message': '一括ツイートが完了しました'})
         time.sleep(auto_posting_interval)
 
 @socketio.on('post_tweet')
 def handle_post_tweet():
-    success = asyncio.run(post_tweet())
+    success = post_tweet()
     if success:
         emit('status', {'message': '一括ツイートが完了しました'})
     else:
@@ -411,9 +644,6 @@ def update_post(post_id):
         file = request.files['file']
         if file.filename != '' and allowed_file(file.filename):
             filename = secure_filename(file.filename)
-            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)
-            # 古いファイルを削除
             old_filepath = os.path.join(app.config['UPLOAD_FOLDER'], existing_post[1])
             if os.path.exists(old_filepath):
                 os.remove(old_filepath)

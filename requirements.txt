@@ -7,3 +7,4 @@ Werkzeug
 gunicorn
 eventlet
 cryptography
+moviepy
