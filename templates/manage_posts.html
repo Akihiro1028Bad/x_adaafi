@@ -25,6 +25,14 @@
                 <label for="newReplyContent">リプライ内容:</label>
                 <textarea id="newReplyContent" name="reply_content" rows="3" required></textarea>
             </div>
+            <div class="form-group">
+                <label for="newStartTime">開始時間 (分:秒):</label>
+                <input type="text" id="newStartTime" name="start_time" pattern="^(\d+):([0-5]?[0-9])$" placeholder="例: 1:30">
+            </div>
+            <div class="form-group">
+                <label for="newEndTime">終了時間 (分:秒):</label>
+                <input type="text" id="newEndTime" name="end_time" pattern="^(\d+):([0-5]?[0-9])$" placeholder="例: 2:45">
+            </div>
             <button type="submit">追加</button>
         </form>
 
@@ -35,6 +43,8 @@
                     <th>ファイル名</th>
                     <th>キャプション</th>
                     <th>リプライ内容</th>
+                    <th>開始時間</th>
+                    <th>終了時間</th>
                     <th>操作</th>
                 </tr>
             </thead>
@@ -62,6 +72,14 @@
                 <div class="form-group">
                     <label for="editReplyContent">リプライ内容:</label>
                     <textarea id="editReplyContent" name="reply_content" rows="3" required></textarea>
+                </div>
+                <div class="form-group">
+                    <label for="editStartTime">開始時間 (分:秒):</label>
+                    <input type="text" id="editStartTime" name="start_time" pattern="^(\d+):([0-5]?[0-9])$" placeholder="例: 1:30">
+                </div>
+                <div class="form-group">
+                    <label for="editEndTime">終了時間 (分:秒):</label>
+                    <input type="text" id="editEndTime" name="end_time" pattern="^(\d+):([0-5]?[0-9])$" placeholder="例: 2:45">
                 </div>
                 <button type="submit">更新</button>
             </form>

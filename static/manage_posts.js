@@ -5,6 +5,19 @@ document.addEventListener('DOMContentLoaded', function() {
     const editModal = document.getElementById('editModal');
     const closeModalBtn = document.getElementsByClassName('close')[0];
 
+    function timeToSeconds(timeString) {
+        if (!timeString) return '';
+        const [minutes, seconds] = timeString.split(':').map(Number);
+        return minutes * 60 + seconds;
+    }
+
+    function secondsToTime(seconds) {
+        if (seconds === null || seconds === '') return '';
+        const minutes = Math.floor(seconds / 60);
+        const remainingSeconds = seconds % 60;
+        return `${minutes}:${remainingSeconds.toString().padStart(2, '0')}`;
+    }
+
     // 投稿一覧を取得して表示
     function fetchPosts() {
         fetch('/api/posts')
@@ -17,6 +30,8 @@ document.addEventListener('DOMContentLoaded', function() {
                         <td>${post.filename}</td>
                         <td>${post.caption}</td>
                         <td>${post.reply_content}</td>
+                        <td>${secondsToTime(post.start_time)}</td>
+                        <td>${secondsToTime(post.end_time)}</td>
                         <td>
                             <button onclick="editPost(${post.id})">編集</button>
                             <button onclick="deletePost(${post.id})">削除</button>
@@ -31,6 +46,8 @@ document.addEventListener('DOMContentLoaded', function() {
     addPostForm.addEventListener('submit', function(e) {
         e.preventDefault();
         const formData = new FormData(addPostForm);
+        formData.set('start_time', timeToSeconds(formData.get('start_time')));
+        formData.set('end_time', timeToSeconds(formData.get('end_time')));
         fetch('/api/posts', {
             method: 'POST',
             body: formData
@@ -52,6 +69,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 document.getElementById('editId').value = post.id;
                 document.getElementById('editCaption').value = post.caption;
                 document.getElementById('editReplyContent').value = post.reply_content;
+                document.getElementById('editStartTime').value = secondsToTime(post.start_time);
+                document.getElementById('editEndTime').value = secondsToTime(post.end_time);
                 editModal.style.display = 'block';
             })
             .catch(error => console.error('Error:', error));
@@ -61,6 +80,8 @@ document.addEventListener('DOMContentLoaded', function() {
         e.preventDefault();
         const formData = new FormData(editPostForm);
         const id = document.getElementById('editId').value;
+        formData.set('start_time', timeToSeconds(formData.get('start_time')));
+        formData.set('end_time', timeToSeconds(formData.get('end_time')));
         fetch(`/api/posts/${id}`, {
             method: 'PUT',
             body: formData

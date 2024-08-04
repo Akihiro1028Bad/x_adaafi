@@ -66,11 +66,20 @@ def init_db():
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
     
+    # videosテーブルが存在しない場合は作成
     c.execute('''CREATE TABLE IF NOT EXISTS videos
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
                   filename TEXT NOT NULL,
                   caption TEXT NOT NULL,
                   reply_content TEXT)''')
+    
+    # start_timeとend_timeカラムが存在しない場合は追加
+    c.execute("PRAGMA table_info(videos)")
+    columns = [column[1] for column in c.fetchall()]
+    if 'start_time' not in columns:
+        c.execute("ALTER TABLE videos ADD COLUMN start_time INTEGER")
+    if 'end_time' not in columns:
+        c.execute("ALTER TABLE videos ADD COLUMN end_time INTEGER")
     
     c.execute('''CREATE TABLE IF NOT EXISTS twitter_accounts
                  (id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -95,44 +104,47 @@ def init_db():
 # アプリケーション起動時にデータベースを初期化
 init_db()
 
-def process_video(video_path, max_duration=120):
-    """
-    動画を処理し、必要に応じて切り取ります。
-    :param video_path: 元の動画ファイルのパス
-    :param max_duration: 最大許容時間（秒）
-    :return: 処理された動画のパス
-    """
+def process_video(video_path, start_time=None, end_time=None, max_duration=120):
+    app.logger.info(f"動画処理を開始: {video_path}, 開始時間: {start_time}, 終了時間: {end_time}")
     clip = VideoFileClip(video_path)
     
-    if clip.duration <= max_duration:
-        clip.close()
-        return video_path
+    original_duration = clip.duration
+    app.logger.info(f"元の動画の長さ: {original_duration}秒")
+
+    if start_time is not None and end_time is not None:
+        # 指定された範囲で動画を切り取る
+        cut_clip = clip.subclip(start_time, min(end_time, original_duration))
+    else:
+        # 開始時間と終了時間が指定されていない場合、元の動画をそのまま使用
+        cut_clip = clip
+
+    cut_duration = cut_clip.duration
+    app.logger.info(f"切り取り後の動画の長さ: {cut_duration}秒")
+
+    if cut_duration > max_duration:
+        app.logger.info(f"動画が{max_duration}秒を超えています。追加の切り取りを行います。")
+        cut_clip = cut_clip.subclip(0, max_duration)
+        app.logger.info(f"最終的な動画の長さ: {max_duration}秒")
     
-    app.logger.info(f"動画が{max_duration}秒を超えています。切り取りを行います。")
-    
-    # 動画を切り取る
-    cut_clip = clip.subclip(0, max_duration)
-    
-    # 一時ファイルを作成
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
         temp_path = temp_file.name
     
-    # 切り取った動画を保存
     cut_clip.write_videofile(temp_path, codec="libx264", audio_codec="aac")
+    app.logger.info(f"処理済み動画を保存しました: {temp_path}")
     
     clip.close()
     cut_clip.close()
     
     return temp_path
 
-def insert_video_data(filename, caption, reply_content):
+def insert_video_data(filename, caption, reply_content, start_time, end_time):
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
     try:
-        c.execute("INSERT INTO videos (filename, caption, reply_content) VALUES (?, ?, ?)", 
-                  (filename, caption, reply_content))
+        c.execute("INSERT INTO videos (filename, caption, reply_content, start_time, end_time) VALUES (?, ?, ?, ?, ?)", 
+                  (filename, caption, reply_content, start_time, end_time))
         conn.commit()
-        app.logger.info(f"データを挿入しました: {filename}")
+        app.logger.info(f"データを挿入しました: {filename}, 開始時間: {start_time}秒, 終了時間: {end_time}秒")
     except sqlite3.Error as e:
         app.logger.error(f"データ挿入中にエラーが発生しました: {str(e)}")
     finally:
@@ -286,8 +298,8 @@ class VideoTweet:
             app.logger.error(f"ツイート投稿中にエラーが発生しました: {str(e)}")
             return None
 
-def post_tweet_main_riply(video_filename, caption, reply_content, account):
-    app.logger.info(f"ツイート投稿プロセスを開始: ファイル名={video_filename}")
+def post_tweet_main_riply(video_filename, caption, reply_content, account, start_time, end_time):
+    app.logger.info(f"ツイート投稿プロセスを開始: ファイル名={video_filename}, 開始時間={start_time}, 終了時間={end_time}")
     
     oauth = OAuth1(
         account['consumer_key'],
@@ -297,7 +309,14 @@ def post_tweet_main_riply(video_filename, caption, reply_content, account):
     )
 
     video_path = os.path.join(app.config['UPLOAD_FOLDER'], video_filename)
-    processed_video_path = process_video(video_path)
+    
+    try:
+        processed_video_path = process_video(video_path, start_time, end_time)
+        app.logger.info(f"動画処理が完了しました: {processed_video_path}")
+    except Exception as e:
+        app.logger.error(f"動画処理中にエラーが発生しました: {str(e)}")
+        return False
+
     video_tweet = VideoTweet(processed_video_path, oauth)
 
     try:
@@ -325,7 +344,7 @@ def post_tweet_main_riply(video_filename, caption, reply_content, account):
             # リプライの投稿
             if reply_content:
                 try:
-                    time.sleep(10)  # 2分待機
+                    time.sleep(10)  # 10秒待機
                     reply_response = client.create_tweet(text=reply_content, in_reply_to_tweet_id=tweet_id)
 
                     if reply_response.data:
@@ -344,9 +363,10 @@ def post_tweet_main_riply(video_filename, caption, reply_content, account):
         return False
     
     finally:
-        # 処理された動画が元の動画と異なる場合、一時ファイルを削除
-        if processed_video_path != video_path:
+        # 処理された動画の一時ファイルを削除
+        if os.path.exists(processed_video_path):
             os.remove(processed_video_path)
+            app.logger.info(f"一時ファイルを削除しました: {processed_video_path}")
 
 @app.route('/', methods=['GET', 'POST'])
 def index():
@@ -359,6 +379,8 @@ def index():
         file = request.files['file']
         caption = request.form.get('caption', '')
         reply_content = request.form.get('reply_content', '')
+        start_time = int(request.form.get('start_time', 0))
+        end_time = int(request.form.get('end_time', 0))
         if file.filename == '':
             app.logger.warning("ファイル名が空です")
             flash('ファイルが選択されていません')
@@ -370,7 +392,7 @@ def index():
             app.logger.info(f"ファイルをアップロードしました: {filepath}")
             
             # データベースに保存
-            insert_video_data(filename, caption, reply_content)
+            insert_video_data(filename, caption, reply_content, start_time, end_time)
             
             flash('動画、キャプション、リプライ内容が保存されました')
             return redirect(url_for('index'))
@@ -384,7 +406,7 @@ def get_videos():
     videos = c.fetchall()
     conn.close()
     app.logger.info(f"動画リストを取得しました: {len(videos)}件")
-    return jsonify([{'id': v[0], 'filename': v[1], 'caption': v[2], 'reply_content': v[3]} for v in videos])
+    return jsonify([{'id': v[0], 'filename': v[1], 'caption': v[2], 'reply_content': v[3], 'start_time': v[4], 'end_time': v[5]} for v in videos])
 
 @socketio.on('connect')
 def handle_connect():
@@ -442,7 +464,7 @@ def get_active_accounts():
 def get_random_post_content():
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
-    c.execute("SELECT filename, caption, reply_content FROM videos ORDER BY RANDOM() LIMIT 1")
+    c.execute("SELECT filename, caption, reply_content, start_time, end_time FROM videos ORDER BY RANDOM() LIMIT 1")
     result = c.fetchone()
     conn.close()
     if result is None:
@@ -467,7 +489,7 @@ def post_tweet_for_account(account):
     username = account[1]
     app.logger.info(f"{username}の投稿処理を開始します")
     try:
-        filename, caption, reply_content = get_random_post_content()
+        filename, caption, reply_content, start_time, end_time = get_random_post_content()
         video_path = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         
         if not os.path.exists(video_path):
@@ -482,7 +504,7 @@ def post_tweet_for_account(account):
             'access_token_secret': account[5]
         }
 
-        success = post_tweet_main_riply(filename, caption, reply_content, account_dict)
+        success = post_tweet_main_riply(filename, caption, reply_content, account_dict, start_time, end_time)
         
         if success:
             log_activity(username, "ツイート投稿", "成功")
@@ -594,7 +616,14 @@ def get_posts():
     c.execute("SELECT * FROM videos")
     posts = c.fetchall()
     conn.close()
-    return jsonify([{'id': p[0], 'filename': p[1], 'caption': p[2], 'reply_content': p[3]} for p in posts])
+    return jsonify([{
+        'id': p[0], 
+        'filename': p[1], 
+        'caption': p[2], 
+        'reply_content': p[3], 
+        'start_time': p[4] if p[4] is not None else '', 
+        'end_time': p[5] if p[5] is not None else ''
+    } for p in posts])
 
 @app.route('/api/posts', methods=['POST'])
 def add_post():
@@ -603,14 +632,19 @@ def add_post():
     file = request.files['file']
     caption = request.form.get('caption', '')
     reply_content = request.form.get('reply_content', '')
+    start_time = request.form.get('start_time', '')
+    end_time = request.form.get('end_time', '')
     if file.filename == '':
         return jsonify({'error': 'ファイルが選択されていません'}), 400
     if file and allowed_file(file.filename):
         filename = secure_filename(file.filename)
         filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
         file.save(filepath)
-        insert_video_data(filename, caption, reply_content)
-        log_activity("System", "投稿追加", f"ファイル名: {filename}")
+        start_time = int(start_time) if start_time else None
+        end_time = int(end_time) if end_time else None
+        insert_video_data(filename, caption, reply_content, start_time, end_time)
+        log_activity("System", "投稿追加", f"ファイル名: {filename}, 開始時間: {start_time}, 終了時間: {end_time}")
+        app.logger.info(f"新しい投稿を追加しました: {filename}, 開始時間: {start_time}, 終了時間: {end_time}")
         return jsonify({'message': '投稿が追加されました', 'filename': filename}), 201
     return jsonify({'error': '許可されていないファイル形式です'}), 400
 
@@ -622,7 +656,14 @@ def get_post(post_id):
     post = c.fetchone()
     conn.close()
     if post:
-        return jsonify({'id': post[0], 'filename': post[1], 'caption': post[2], 'reply_content': post[3]})
+        return jsonify({
+            'id': post[0], 
+            'filename': post[1], 
+            'caption': post[2], 
+            'reply_content': post[3], 
+            'start_time': post[4] if post[4] is not None else '', 
+            'end_time': post[5] if post[5] is not None else ''
+        })
     return jsonify({'error': '投稿が見つかりません'}), 404
 
 @app.route('/api/posts/<int:post_id>', methods=['PUT'])
@@ -630,7 +671,6 @@ def update_post(post_id):
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
     
-    # 既存の投稿を取得
     c.execute("SELECT * FROM videos WHERE id = ?", (post_id,))
     existing_post = c.fetchone()
     if not existing_post:
@@ -639,6 +679,8 @@ def update_post(post_id):
 
     caption = request.form.get('caption', existing_post[2])
     reply_content = request.form.get('reply_content', existing_post[3])
+    start_time = request.form.get('start_time', '')
+    end_time = request.form.get('end_time', '')
     
     if 'file' in request.files:
         file = request.files['file']
@@ -647,17 +689,24 @@ def update_post(post_id):
             old_filepath = os.path.join(app.config['UPLOAD_FOLDER'], existing_post[1])
             if os.path.exists(old_filepath):
                 os.remove(old_filepath)
+            new_filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(new_filepath)
+            app.logger.info(f"新しい動画ファイルをアップロードしました: {new_filepath}")
         else:
             filename = existing_post[1]
     else:
         filename = existing_post[1]
 
-    c.execute("UPDATE videos SET filename = ?, caption = ?, reply_content = ? WHERE id = ?",
-              (filename, caption, reply_content, post_id))
+    start_time = int(start_time) if start_time else None
+    end_time = int(end_time) if end_time else None
+
+    c.execute("UPDATE videos SET filename = ?, caption = ?, reply_content = ?, start_time = ?, end_time = ? WHERE id = ?",
+              (filename, caption, reply_content, start_time, end_time, post_id))
     conn.commit()
     conn.close()
     
-    log_activity("System", "投稿更新", f"投稿ID: {post_id}")
+    log_activity("System", "投稿更新", f"投稿ID: {post_id}, 開始時間: {start_time}, 終了時間: {end_time}")
+    app.logger.info(f"投稿を更新しました: ID {post_id}, 開始時間: {start_time}, 終了時間: {end_time}")
     return jsonify({'message': '投稿が更新されました', 'id': post_id})
 
 @app.route('/api/posts/<int:post_id>', methods=['DELETE'])
@@ -665,24 +714,23 @@ def delete_post(post_id):
     conn = sqlite3.connect('videos.db')
     c = conn.cursor()
     
-    # 投稿を取得
     c.execute("SELECT filename FROM videos WHERE id = ?", (post_id,))
     post = c.fetchone()
     if not post:
         conn.close()
         return jsonify({'error': '投稿が見つかりません'}), 404
 
-    # データベースから削除
     c.execute("DELETE FROM videos WHERE id = ?", (post_id,))
     conn.commit()
     conn.close()
 
-    # ファイルを削除
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], post[0])
     if os.path.exists(filepath):
         os.remove(filepath)
+        app.logger.info(f"動画ファイルを削除しました: {filepath}")
 
     log_activity("System", "投稿削除", f"投稿ID: {post_id}")
+    app.logger.info(f"投稿を削除しました: ID {post_id}")
     return jsonify({'message': '投稿が削除されました', 'id': post_id})
 
 @app.route('/manage_accounts')
